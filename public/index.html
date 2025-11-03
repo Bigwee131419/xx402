@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>x402 天气演示（Base + USDC）</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin:0; font:16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; background:#0d1117; color:#e6edf3; }
+    .wrap { max-width:720px; margin:60px auto; padding:24px; }
+    h1 { font-weight:700; font-size:26px; margin:0 0 16px; }
+    .card { background:#161b22; border:1px solid #30363d; border-radius:12px; padding:16px; }
+    .row { display:flex; gap:12px; margin:12px 0; align-items:center; }
+    input,button { padding:10px 12px; border-radius:8px; border:1px solid #30363d; background:#0d1117; color:#e6edf3; }
+    input { flex:1; }
+    button { background:#1f6feb; border:none; cursor:pointer; font-weight:600; }
+    button.secondary { background:#21262d; }
+    pre { white-space:pre-wrap; background:#0d1117; border:1px dashed #30363d; border-radius:8px; padding:12px; min-height:72px; }
+    small{opacity:.75}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>🌤 天气 API 付费体验（x402）</h1>
+
+    <div class="card">
+      <div class="row">
+        <button id="btnConnect">① 连接钱包</button>
+        <button id="btnCheck" class="secondary" title="检查当前网络是否为 Base 主网">检查网络</button>
+        <div id="account"><small>钱包未连接</small></div>
+      </div>
+
+      <div class="row">
+        <label for="baseUrl"><small>后端 API 基址</small></label>
+        <input id="baseUrl" value="http://localhost:3000" />
+      </div>
+
+      <div class="row">
+        <input id="city" placeholder="输入城市（例如：上海）" value="上海" />
+        <button id="btnFetch">② 获取 /weather（自动付款）</button>
+      </div>
+
+      <pre id="out">等待操作…</pre>
+      <small>提示：当服务返回 402 时，本页会在新标签页打开受保护链接以触发付款；完成后会自动轮询并在本页展示结果。</small>
+    </div>
+  </div>
+
+  <script>
+    // Base 主网 chainId
+    const BASE_CHAIN_ID_HEX = '0x2105';
+
+    const $ = (id) => document.getElementById(id);
+    const out = $('out');
+    const accountEl = $('account');
+
+    let currentAccount = null;
+
+    function log(msg, obj) {
+      out.textContent = (typeof msg === 'string' ? msg : JSON.stringify(msg, null, 2))
+        + (obj ? '\n' + JSON.stringify(obj, null, 2) : '');
+    }
+
+    async function ensureProvider() {
+      const injected = window.ethereum;
+      if (!injected) {
+        alert('未检测到钱包。请安装 Coinbase Wallet 或 MetaMask。');
+        throw new Error('No wallet injected');
+      }
+
+      // 如果有多个 provider（例如 MetaMask / Coinbase / Rabby / Backpack），优先选 MetaMask
+      let provider = injected;
+      const candidates = injected.providers;
+      if (Array.isArray(candidates) && candidates.length) {
+        provider =
+          candidates.find((p) => p.isMetaMask) ||
+          candidates.find((p) => p.isCoinbaseWallet) ||
+          candidates[0];
+      }
+      // 简单连通性检查
+      if (!provider.request) {
+        throw new Error('Injected provider missing request()');
+      }
+      return provider;
+    }
+
+    async function connectWallet() {
+      try {
+        const eth = await ensureProvider();
+        // 请求账号
+        const accounts = await eth.request({ method: 'eth_requestAccounts' });
+        currentAccount = accounts?.[0] || null;
+        accountEl.textContent = currentAccount ? `已连接：${currentAccount}` : '钱包未连接';
+
+        // 若网络不是 Base，则尝试切换/添加
+        const chainId = await eth.request({ method: 'eth_chainId' });
+        if (chainId !== BASE_CHAIN_ID_HEX) {
+          try {
+            await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: BASE_CHAIN_ID_HEX }] });
+          } catch (switchErr) {
+            // 未添加则尝试添加
+            if (switchErr?.code === 4902) {
+              await eth.request({
+                method: 'wallet_addEthereumChain',
+                params: [{
+                  chainId: BASE_CHAIN_ID_HEX,
+                  chainName: 'Base',
+                  nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
+                  rpcUrls: ['https://mainnet.base.org'],
+                  blockExplorerUrls: ['https://basescan.org']
+                }]
+              });
+            } else {
+              console.warn('切换网络失败', switchErr);
+            }
+          }
+        }
+
+        log('✅ 钱包连接成功。若按钮 ② 无响应，刷新页面后再试。');
+      } catch (err) {
+        console.error(err);
+        log('❌ 连接失败：' + (err?.message || err));
+      }
+    }
+
+    async function checkNetwork() {
+      try {
+        const eth = await ensureProvider();
+        const chainId = await eth.request({ method: 'eth_chainId' });
+        log(`当前链：${chainId}（${chainId === BASE_CHAIN_ID_HEX ? 'Base 主网 ✅' : '非 Base，请切换'}）`);
+      } catch (err) {
+        log('检查失败：' + (err?.message || err));
+      }
+    }
+
+    async function fetchWeather() {
+      const baseUrl = $('baseUrl').value.trim().replace(/\/$/, '');
+      const city = $('city').value.trim() || '上海';
+      const url = `${baseUrl}/weather?location=${encodeURIComponent(city)}`;
+
+      log('⏳ 请求：' + url);
+
+      try {
+        const res = await fetch(url, { method: 'GET', cache: 'no-store', credentials: 'omit' });
+
+        // 情况 1：后端直接返回 200 —— 已经有权限，直接展示
+        if (res.ok) {
+          const data = await res.json();
+          log('✅ 返回：\n' + JSON.stringify(data, null, 2));
+          return;
+        }
+
+        // 情况 2：返回 402，需要触发支付
+        if (res.status === 402) {
+          log('💳 检测到 402，需要付款。已在新标签页打开受保护链接，请在新页完成支付…');
+
+          // 通过“导航”触发 x402 支付面板
+          const payTab = window.open(url, '_blank');
+
+          // 轮询等待后端从 402 变为 200
+          const timeoutMs = 60_000; // 与服务端的 maxTimeoutSeconds 对齐
+          const start = Date.now();
+          const tick = async () => {
+            try {
+              const r = await fetch(url, { method: 'GET', cache: 'no-store', credentials: 'omit' });
+              if (r.ok) {
+                const data = await r.json();
+                try { payTab?.close(); } catch {}
+                log('✅ 返回：\n' + JSON.stringify(data, null, 2));
+                return true;
+              }
+            } catch {}
+            return false;
+          };
+
+          // 先等 1s 再开始轮询，避免与新标签页的加载竞争
+          await new Promise((r) => setTimeout(r, 1000));
+
+          while (Date.now() - start < timeoutMs) {
+            // 每 1.2s 轮询一次
+            // eslint-disable-next-line no-await-in-loop
+            const ok = await tick();
+            if (ok) return;
+            // eslint-disable-next-line no-await-in-loop
+            await new Promise((r) => setTimeout(r, 1200));
+          }
+
+          log('⏱️ 等待超时：请确认在新标签页完成支付后，返回本页重新点击尝试。');
+          return;
+        }
+
+        // 其它非 200/402 错误
+        const text = await res.text().catch(() => '');
+        log(`HTTP ${res.status}：${text || '请稍后重试'}`);
+      } catch (err) {
+        console.error(err);
+        log('❌ 请求出错：' + (err?.message || err));
+      }
+    }
+
+    // 事件绑定
+    $('btnConnect').onclick = connectWallet;
+    $('btnCheck').onclick = checkNetwork;
+    $('btnFetch').onclick = fetchWeather;
+
+    // 钱包账户/网络变更监听（可选）
+    if (window.ethereum) {
+      window.ethereum.on?.('accountsChanged', (accs) => {
+        currentAccount = accs?.[0] || null;
+        accountEl.textContent = currentAccount ? `已连接：${currentAccount}` : '钱包未连接';
+      });
+      window.ethereum.on?.('chainChanged', () => location.reload());
+    }
+    // 兼容使用 inline onclick 的旧页面
+    window.connectWallet = connectWallet;      // 连接钱包
+    window.getWeather   = fetchWeather;        // 获取天气（自动付款）
+    window.getNetwork   = checkNetwork;        // 检查网络
+  </script>
+</body>
+</html>
