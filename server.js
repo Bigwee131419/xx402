@@ -11,6 +11,8 @@ async function start() {
   const { facilitator } = await import('@coinbase/x402');
 
   const app = express();
+  // 让 Express 识别反向代理（Vercel/NGINX），确保生成的 resource 使用 https
+  app.set('trust proxy', true);
 
   // 静态文件服务，把 index.html 放在 public 目录
   app.use(express.static(path.join(__dirname, 'public')));
@@ -27,8 +29,25 @@ async function start() {
         network: process.env.NETWORK,
         config: {
           description: '获取任意位置的天气',
-          inputSchema: { type: 'object' },
-          outputSchema: { type: 'object' }
+          inputSchema: {
+            type: 'http',
+            method: 'GET',
+            discoverable: true,
+            query: {
+              type: 'object',
+              properties: {
+                location: { type: 'string', description: '城市名称，如 上海/北京' }
+              }
+            }
+          },
+          outputSchema: {
+            type: 'object',
+            properties: {
+              weather: { type: 'string' },
+              temperature: { type: 'number' },
+              city: { type: 'string' }
+            }
+          }
         }
       }
     },
